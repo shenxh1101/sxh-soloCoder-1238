@@ -1,0 +1,4 @@
+User-Agent: TestAgent/1.0
+Accept: application/json
+X-Custom-Header: custom-value
+Content-Type: application/json
