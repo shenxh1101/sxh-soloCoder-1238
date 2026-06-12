@@ -12,7 +12,7 @@ from .batch import BatchResult
 class HarExporter:
     CREATOR = {
         "name": "httpdiag",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "comment": "HTTP Diagnostics Tool",
     }
 
@@ -47,10 +47,25 @@ class HarExporter:
             }
 
         content = {
-            "size": result.response_body_size,
-            "mimeType": result.response_headers.get("Content-Type", "text/plain"),
-            "text": result.response_body,
+            "size": result.response_body_raw_size,
+            "compression": 0,
+            "mimeType": result.response_content_type or "application/octet-stream",
         }
+
+        if not result.response_is_binary:
+            content["text"] = result.response_body
+        else:
+            content["comment"] = "Binary content not stored in HAR text field"
+
+        if result.response_body_truncated:
+            content["comment"] = (content.get("comment", "") + " Content truncated").strip()
+
+        redirect_url = ""
+        if 300 <= result.status_code < 400:
+            for h in result.response_headers:
+                if h.lower() == "location":
+                    redirect_url = result.response_headers[h]
+                    break
 
         timings = {
             "dns": round(result.timing.dns_lookup * 1000, 3),
@@ -58,8 +73,8 @@ class HarExporter:
             "ssl": round(result.timing.tls_handshake * 1000, 3) if result.is_https else -1,
             "send": round(result.timing.request_send * 1000, 3),
             "wait": round(
-                (result.timing.time_to_first_byte - result.timing.dns_lookup - result.timing.tcp_connect
-                 - result.timing.tls_handshake - result.timing.request_send) * 1000, 3
+                max(0, (result.timing.time_to_first_byte - result.timing.dns_lookup - result.timing.tcp_connect
+                 - result.timing.tls_handshake - result.timing.request_send)) * 1000, 3
             ),
             "receive": round(result.timing.content_download * 1000, 3),
             "_blocked": 0,
@@ -76,7 +91,7 @@ class HarExporter:
                 "headers": request_headers,
                 "queryString": query_string,
                 "headersSize": -1,
-                "bodySize": len(result.request_body.encode("utf-8")) if result.request_body else 0,
+                "bodySize": result.request_body_size,
             },
             "response": {
                 "status": result.status_code,
@@ -85,14 +100,21 @@ class HarExporter:
                 "cookies": [],
                 "headers": response_headers,
                 "content": content,
-                "redirectURL": "",
+                "redirectURL": redirect_url,
                 "headersSize": -1,
-                "bodySize": result.response_body_size,
+                "bodySize": result.response_body_raw_size,
             },
             "cache": {},
             "timings": timings,
             "serverIPAddress": result.ip_address,
             "connection": "",
+            "_custom": {
+                "content_type": result.response_content_type,
+                "is_binary": result.response_is_binary,
+                "body_truncated": result.response_body_truncated,
+                "body_size_text": result.response_body_size,
+                "body_size_raw": result.response_body_raw_size,
+            },
         }
 
         if post_data:

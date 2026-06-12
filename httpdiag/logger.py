@@ -33,7 +33,13 @@ class RequestLogger:
             f.write(f"Method: {result.method}\n")
             f.write(f"IP Address: {result.ip_address}\n")
             f.write(f"HTTPS: {'Yes' if result.is_https else 'No'}\n")
-            f.write(f"Status: {result.status_code} {result.status_text}\n\n")
+            f.write(f"Status: {result.status_code} {result.status_text}\n")
+            f.write(f"Content-Type: {result.response_content_type}\n")
+            f.write(f"Is Binary: {'Yes' if result.response_is_binary else 'No'}\n")
+            f.write(f"Body Size (raw bytes): {result.response_body_raw_size}\n")
+            if result.response_body_truncated:
+                f.write(f"WARNING: Response body was TRUNCATED\n")
+            f.write("\n")
 
             f.write("-" * 70 + "\n")
             f.write("TIMING BREAKDOWN\n")
@@ -68,9 +74,15 @@ class RequestLogger:
             f.write("\n")
 
             f.write("-" * 70 + "\n")
-            f.write(f"RESPONSE BODY ({result.response_body_size} bytes)\n")
+            f.write(f"RESPONSE BODY ({result.response_body_raw_size} bytes)\n")
+            if result.response_body_truncated:
+                f.write("(TRUNCATED - see raw size above for actual)\n")
             f.write("-" * 70 + "\n")
-            f.write(result.response_body)
+            if result.response_is_binary:
+                f.write(f"[Binary content omitted - {result.response_body_raw_size} bytes]\n")
+                f.write(f"Hex preview: {result.response_body[:128].encode('utf-8', errors='replace').hex()}\n")
+            else:
+                f.write(result.response_body)
             f.write("\n\n")
 
             if result.error:
@@ -97,15 +109,15 @@ class RequestLogger:
             f.write("=" * 70 + "\n\n")
 
             f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Total Redirects: {chain.total_redirects}\n")
+            f.write(f"Total Redirects: {chain.total_redirects} (max allowed: {chain.max_redirects})\n")
             f.write(f"Total Time: {chain.total_time * 1000:.3f} ms\n")
             if chain.max_redirects_exceeded:
-                f.write(f"WARNING: Max redirects exceeded!\n")
+                f.write(f"WARNING: Max redirects ({chain.max_redirects}) exceeded, stopped at step {chain.total_redirects}\n")
             f.write("\n")
 
             for i, step in enumerate(chain.steps, 1):
                 f.write("=" * 70 + "\n")
-                f.write(f"REDIRECT STEP {i}: {step.status_code}\n")
+                f.write(f"REDIRECT STEP {i}/{chain.max_redirects}: {step.status_code}\n")
                 f.write("=" * 70 + "\n")
                 f.write(f"  From: {step.from_url}\n")
                 f.write(f"  To:   {step.to_url}\n")
@@ -191,7 +203,7 @@ class RequestLogger:
 
             for i, r in enumerate(batch.results, 1):
                 f.write("-" * 70 + "\n")
-                f.write(f"REQUEST #{i}\n")
+                f.write(f"REQUEST #{i} / {batch.count}\n")
                 f.write("-" * 70 + "\n")
                 self._write_exchange(f, r)
 
@@ -218,19 +230,31 @@ class RequestLogger:
             f.write(f"{indent}  {key}: {value}\n")
         f.write("\n")
         if result.request_body:
-            preview = result.request_body[:200]
-            f.write(f"{indent}  Body ({len(result.request_body)} bytes): {preview}\n")
-            if len(result.request_body) > 200:
-                f.write(f"{indent}  ... (truncated)\n")
+            f.write(f"{indent}  Request Body ({result.request_body_size} bytes):\n")
+            for line in result.request_body.splitlines():
+                f.write(f"{indent}    {line}\n")
             f.write("\n")
 
         f.write(f"{indent}Response:\n")
         f.write(f"{indent}  HTTP/1.1 {result.status_code} {result.status_text}\n")
-        for key, value in list(result.response_headers.items())[:15]:
-            f.write(f"{indent}  {key}: {value}\n")
-        if len(result.response_headers) > 15:
-            f.write(f"{indent}  ... ({len(result.response_headers) - 15} more headers)\n")
+        f.write(f"{indent}  Content-Type: {result.response_content_type}\n")
+        f.write(f"{indent}  Body Size: {result.response_body_raw_size} bytes (raw)")
+        if result.response_body_truncated:
+            f.write(" [TRUNCATED]")
+        if result.response_is_binary:
+            f.write(" [BINARY]")
         f.write("\n")
+        for key, value in result.response_headers.items():
+            f.write(f"{indent}  {key}: {value}\n")
+        f.write("\n")
+
+        if not result.response_is_binary and result.response_body:
+            f.write(f"{indent}  Response Body:\n")
+            for line in result.response_body.splitlines():
+                f.write(f"{indent}    {line}\n")
+            f.write("\n")
+        elif result.response_is_binary:
+            f.write(f"{indent}  Response Body: [Binary content, {result.response_body_raw_size} bytes]\n\n")
 
         if result.error:
             f.write(f"{indent}Error: {result.error}\n")

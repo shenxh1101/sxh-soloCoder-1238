@@ -29,6 +29,7 @@ class RedirectChain:
     steps: List[RedirectStep] = field(default_factory=list)
     final_result: Optional[DiagnosticsResult] = None
     max_redirects_exceeded: bool = False
+    max_redirects: int = 0
 
     @property
     def total_redirects(self) -> int:
@@ -48,6 +49,7 @@ class RedirectChain:
             "total_redirects": self.total_redirects,
             "total_time_ms": round(self.total_time * 1000, 3),
             "max_redirects_exceeded": self.max_redirects_exceeded,
+            "max_redirects": self.max_redirects,
             "steps": [step.to_dict() for step in self.steps],
         }
         if self.final_result:
@@ -78,14 +80,14 @@ class RedirectTracker:
         headers: Optional[Dict[str, str]] = None,
         body: Optional[str] = None,
     ) -> RedirectChain:
-        chain = RedirectChain()
+        chain = RedirectChain(max_redirects=self.max_redirects)
         current_url = url
         current_method = method.upper()
         current_body = body
         current_headers = dict(headers) if headers else {}
         step_count = 0
 
-        while step_count <= self.max_redirects:
+        while True:
             result = self.diagnostics.request(
                 current_url,
                 method=current_method,
@@ -100,6 +102,12 @@ class RedirectTracker:
             if 300 <= result.status_code < 400:
                 location = self._get_header_ci(result.response_headers, "Location") or ""
                 if not location:
+                    chain.final_result = result
+                    break
+
+                if step_count >= self.max_redirects:
+                    chain.max_redirects_exceeded = True
+                    result.error = f"Too many redirects (max {self.max_redirects})"
                     chain.final_result = result
                     break
 
@@ -120,12 +128,6 @@ class RedirectTracker:
 
                 current_url = next_url
                 step_count += 1
-
-                if step_count > self.max_redirects:
-                    chain.max_redirects_exceeded = True
-                    result.error = f"Too many redirects (max {self.max_redirects})"
-                    chain.final_result = result
-                    break
             else:
                 chain.final_result = result
                 break

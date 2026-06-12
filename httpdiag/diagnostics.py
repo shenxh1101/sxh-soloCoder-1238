@@ -3,7 +3,8 @@ import ssl
 import time
 import json
 import urllib.parse
-from dataclasses import dataclass, field, asdict
+import mimetypes
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any
 
 
@@ -41,10 +42,15 @@ class DiagnosticsResult:
     status_text: str = ""
     request_headers: Dict[str, str] = field(default_factory=dict)
     request_body: str = ""
+    request_body_size: int = 0
     response_headers: Dict[str, str] = field(default_factory=dict)
     response_body: str = ""
     response_body_preview: str = ""
     response_body_size: int = 0
+    response_body_raw_size: int = 0
+    response_body_truncated: bool = False
+    response_content_type: str = ""
+    response_is_binary: bool = False
     timing: TimingInfo = field(default_factory=TimingInfo)
     ip_address: str = ""
     is_https: bool = False
@@ -84,9 +90,14 @@ class DiagnosticsResult:
             "is_https": self.is_https,
             "request_headers": self.request_headers,
             "request_body": self.request_body,
+            "request_body_size": self.request_body_size,
             "response_headers": self.response_headers,
+            "response_content_type": self.response_content_type,
+            "response_is_binary": self.response_is_binary,
             "response_body_preview": self.response_body_preview,
             "response_body_size": self.response_body_size,
+            "response_body_raw_size": self.response_body_raw_size,
+            "response_body_truncated": self.response_body_truncated,
             "timing": self.timing.to_dict(),
         }
         if self.error:
@@ -97,9 +108,26 @@ class DiagnosticsResult:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
+def _detect_binary(data: bytes, content_type: str = "") -> bool:
+    if content_type:
+        ct_lower = content_type.lower()
+        if ct_lower.startswith("text/") or "json" in ct_lower or "xml" in ct_lower or "javascript" in ct_lower:
+            return False
+        if (ct_lower.startswith("image/") or ct_lower.startswith("audio/") or
+                ct_lower.startswith("video/") or "octet-stream" in ct_lower or
+                "zip" in ct_lower or "compressed" in ct_lower or "pdf" in ct_lower):
+            return True
+    try:
+        data[:8192].decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
 class HttpDiagnostics:
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 30, max_body_size: int = 10 * 1024 * 1024):
         self.timeout = timeout
+        self.max_body_size = max_body_size
 
     def request(
         self,
@@ -122,6 +150,7 @@ class HttpDiagnostics:
             method=method,
             is_https=is_https,
             request_body=body or "",
+            request_body_size=len(body.encode("utf-8")) if body else 0,
         )
 
         actual_request_headers: Dict[str, str] = {}
@@ -182,6 +211,8 @@ class HttpDiagnostics:
             header_end = -1
             resp_headers: Dict[str, str] = {}
             is_complete = False
+            body_truncated = False
+            declared_content_length: Optional[int] = None
 
             while not is_complete:
                 try:
@@ -191,9 +222,9 @@ class HttpDiagnostics:
                     if not first_byte_received:
                         result.timing.time_to_first_byte = time.time() - total_start
                         first_byte_received = True
-                    response_data += chunk
 
                     if header_end == -1:
+                        response_data += chunk
                         header_end = response_data.find(b"\r\n\r\n")
                         if header_end != -1:
                             header_data = response_data[:header_end].decode("utf-8", errors="replace")
@@ -202,6 +233,30 @@ class HttpDiagnostics:
                                 if ":" in line:
                                     key, value = line.split(":", 1)
                                     resp_headers[key.strip()] = value.strip()
+                            content_length_header = self._get_header_ci(resp_headers, "Content-Length")
+                            if content_length_header:
+                                try:
+                                    declared_content_length = int(content_length_header)
+                                except ValueError:
+                                    pass
+                    else:
+                        if declared_content_length is not None:
+                            existing_body = len(response_data) - header_end - 4
+                            remaining = declared_content_length - existing_body
+                            if remaining <= 0:
+                                is_complete = True
+                                continue
+                            if len(chunk) > remaining:
+                                chunk = chunk[:remaining]
+                                body_truncated = True
+                                response_data += chunk
+                                is_complete = True
+                                continue
+                        elif len(response_data) > self.max_body_size:
+                            body_truncated = True
+                            is_complete = True
+                            continue
+                        response_data += chunk
 
                     if header_end != -1:
                         body_data = response_data[header_end + 4:]
@@ -230,7 +285,7 @@ class HttpDiagnostics:
                 raise ValueError("Invalid HTTP response: no header separator found")
 
             header_data = response_data[:header_end].decode("utf-8", errors="replace")
-            body_data = response_data[header_end + 4:]
+            raw_body_data = response_data[header_end + 4:]
 
             header_lines = header_data.split("\r\n")
             status_line = header_lines[0]
@@ -247,34 +302,54 @@ class HttpDiagnostics:
                     resp_headers[key.strip()] = value.strip()
             result.response_headers = resp_headers
 
+            content_type = self._get_header_ci(resp_headers, "Content-Type", "")
+            result.response_content_type = content_type.split(";")[0].strip() if content_type else ""
+
             transfer_encoding = self._get_header_ci(resp_headers, "Transfer-Encoding", "").lower()
             content_length = self._get_header_ci(resp_headers, "Content-Length")
 
+            decoded_body_data = raw_body_data
             if "chunked" in transfer_encoding:
-                body_data = self._decode_chunked(body_data)
+                decoded_body_data = self._decode_chunked(raw_body_data)
             elif content_length:
                 try:
                     content_length_int = int(content_length)
-                    body_data = body_data[:content_length_int]
+                    if len(decoded_body_data) > content_length_int:
+                        decoded_body_data = decoded_body_data[:content_length_int]
+                        body_truncated = False
                 except ValueError:
                     pass
 
+            result.response_body_raw_size = len(decoded_body_data)
+            result.response_body_truncated = body_truncated or (
+                content_length is not None and
+                declared_content_length is not None and
+                len(decoded_body_data) < declared_content_length
+            )
+
+            result.response_is_binary = _detect_binary(decoded_body_data, content_type)
+
+            if result.response_is_binary:
+                hex_preview = decoded_body_data[:64].hex()
+                result.response_body = f"[Binary data, {result.response_body_raw_size} bytes]"
+                result.response_body_preview = f"[Binary data, hex preview: {hex_preview}...]"
+                result.response_body_size = result.response_body_raw_size
+            else:
+                charset = "utf-8"
+                if content_type and "charset=" in content_type:
+                    charset_part = content_type.split("charset=")[1]
+                    charset = charset_part.split(";")[0].strip()
+
+                try:
+                    result.response_body = decoded_body_data.decode(charset, errors="replace")
+                except (LookupError, UnicodeDecodeError):
+                    result.response_body = decoded_body_data.decode("utf-8", errors="replace")
+
+                result.response_body_size = len(result.response_body.encode("utf-8"))
+                result.response_body_preview = result.response_body[:200]
+
             result.timing.total = download_end - total_start
             result.timing.content_download = result.timing.total - result.timing.time_to_first_byte
-
-            content_type = self._get_header_ci(resp_headers, "Content-Type", "")
-            encoding = "utf-8"
-            if "charset=" in content_type:
-                charset_part = content_type.split("charset=")[1]
-                encoding = charset_part.split(";")[0].strip()
-
-            try:
-                result.response_body = body_data.decode(encoding, errors="replace")
-            except (LookupError, UnicodeDecodeError):
-                result.response_body = body_data.decode("utf-8", errors="replace")
-
-            result.response_body_size = len(result.response_body.encode("utf-8"))
-            result.response_body_preview = result.response_body[:200]
 
         except Exception as e:
             result.error = str(e)

@@ -12,6 +12,8 @@ from .compare import CompareMode
 from .logger import RequestLogger
 from .batch import BatchTester
 from .har import HarExporter
+from .profiles import ProfileManager
+from .history import HistoryManager
 from .utils import load_headers_from_file, format_duration
 
 
@@ -25,6 +27,12 @@ def print_result(result, show_body=True):
     print(f"  IP地址:       {result.ip_address}")
     print(f"  HTTPS:        {'是' if result.is_https else '否'}")
     print(f"  状态码:       {result.status_code} {result.status_text}")
+    print(f"  内容类型:     {result.response_content_type or '(unknown)'}")
+    print(f"  响应体大小:   {result.response_body_raw_size} 字节 (原始)")
+    if result.response_is_binary:
+        print(f"  二进制内容:   是")
+    if result.response_body_truncated:
+        print(f"  内容截断:     是")
     print()
     print("  时间分解:")
     print(f"    DNS解析:      {format_duration(result.timing.dns_lookup)}")
@@ -41,11 +49,11 @@ def print_result(result, show_body=True):
         print(f"    {key}: {value}")
     print()
     if result.request_body:
-        print(f"  请求体:")
+        print(f"  请求体 ({result.request_body_size} 字节):")
         body_preview = result.request_body[:200]
         print(f"    {repr(body_preview)}")
         if len(result.request_body) > 200:
-            print(f"    (总长度 {len(result.request_body)} 字节，已截断)")
+            print(f"    (总长度 {len(result.request_body)} 字节，显示截断)")
         print()
     print(f"  响应头:")
     for key, value in list(result.response_headers.items())[:15]:
@@ -54,22 +62,21 @@ def print_result(result, show_body=True):
         print(f"    ... 还有 {len(result.response_headers) - 15} 个响应头")
     print()
     if show_body:
-        print(f"  响应体 (前200字符):")
+        print(f"  响应体预览:")
         print(f"    {repr(result.response_body_preview)}")
-        print(f"  响应体总长度: {result.response_body_size} 字节")
 
 
 def print_redirect_chain(chain):
-    print(f"\n  重定向次数: {chain.total_redirects}")
+    print(f"\n  重定向次数: {chain.total_redirects} / {chain.max_redirects}")
     print(f"  总耗时:     {format_duration(chain.total_time)}")
     if chain.max_redirects_exceeded:
-        print(f"  警告: 超过最大重定向次数限制，已走过的完整链路已列出")
+        print(f"  警告: 超过最大重定向次数限制 ({chain.max_redirects})，已停住，下面是完整链路")
     print()
 
     for i, step in enumerate(chain.steps, 1):
-        print(f"  [{i}] {step.status_code}  {step.from_url}")
-        print(f"       ↓  {format_duration(step.result.timing.total)}")
-        print(f"       →  {step.to_url}")
+        print(f"  [{i}/{chain.max_redirects}] {step.status_code}  {step.from_url}")
+        print(f"               ↓  {format_duration(step.result.timing.total)}")
+        print(f"               →  {step.to_url}")
         print()
 
     if chain.final_result:
@@ -82,16 +89,26 @@ def main():
         description="HTTP 请求诊断工具 - 模拟 HTTP 请求全过程并输出详细诊断信息",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
+常用示例:
   %(prog)s https://www.example.com
   %(prog)s -X POST -d '{"key":"value"}' https://api.example.com/data
   %(prog)s -H headers.txt https://www.example.com
   %(prog)s --json https://www.example.com
-  %(prog)s --log request.log https://www.example.com
-  %(prog)s --har request.har https://www.example.com
+  %(prog)s --log request.log --har request.har https://www.example.com
   %(prog)s --compare https://site1.com https://site2.com
-  %(prog)s --batch -n 10 https://www.example.com
-  %(prog)s --no-redirect https://www.example.com
+  %(prog)s --batch -n 100 https://www.example.com
+  %(prog)s --no-redirect --max-redirects 3 http://example.com
+
+Profile 管理:
+  %(prog)s --profile-save myapi -X POST -H headers.txt -d '{}' https://api.example.com
+  %(prog)s --profile-list
+  %(prog)s --profile-use myapi
+  %(prog)s --profile-delete myapi
+
+历史记录与趋势:
+  %(prog)s --history-list
+  %(prog)s --history-trend --url https://example.com
+  %(prog)s --history-trend --profile myapi
         """,
     )
 
@@ -217,26 +234,178 @@ def main():
     )
 
     parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="不保存本次请求到历史记录",
+    )
+
+    profile_group = parser.add_argument_group("Profile 预设管理")
+    profile_group.add_argument(
+        "--profile-save",
+        metavar="NAME",
+        help="保存当前请求配置（method/headers/body/timeout/URL）为 profile",
+    )
+    profile_group.add_argument(
+        "--profile-use",
+        metavar="NAME",
+        help="使用已保存的 profile，命令行参数会覆盖 profile 的设置",
+    )
+    profile_group.add_argument(
+        "--profile-list",
+        action="store_true",
+        help="列出所有已保存的 profile",
+    )
+    profile_group.add_argument(
+        "--profile-delete",
+        metavar="NAME",
+        help="删除指定的 profile",
+    )
+    profile_group.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="保存 profile 时允许覆盖已存在的同名 profile",
+    )
+
+    history_group = parser.add_argument_group("历史记录与趋势")
+    history_group.add_argument(
+        "--history-list",
+        action="store_true",
+        help="列出最近的请求历史",
+    )
+    history_group.add_argument(
+        "--history-trend",
+        action="store_true",
+        help="查看请求趋势统计，配合 --url 或 --profile 使用",
+    )
+    history_group.add_argument(
+        "--history-limit",
+        type=int,
+        default=30,
+        help="趋势分析/历史列表的记录条数，默认 30",
+    )
+    history_group.add_argument(
+        "--history-clear",
+        action="store_true",
+        help="清空所有历史记录",
+    )
+
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
-        version="httpdiag 1.1.0",
+        version="httpdiag 1.2.0",
     )
 
     args = parser.parse_args()
 
-    if not args.url and not args.compare:
+    profile_manager = ProfileManager()
+    history_manager = HistoryManager()
+
+    if args.profile_list:
+        profiles = profile_manager.list()
+        if not profiles:
+            print("  没有保存的 profile")
+        else:
+            print(f"  已保存 {len(profiles)} 个 profile:\n")
+            for p in profiles:
+                print(f"  [{p.name}]")
+                print(f"    URL:      {p.url}")
+                print(f"    方法:     {p.method}")
+                print(f"    超时:     {p.timeout}s")
+                print(f"    Headers:  {len(p.headers)} 个")
+                print(f"    Body:     {len(p.body)} 字节" if p.body else "    Body:     (无)")
+                print(f"    更新:     {p.updated_at}")
+                print()
+        return
+
+    if args.profile_delete:
+        ok = profile_manager.delete(args.profile_delete)
+        if ok:
+            print(f"  已删除 profile: {args.profile_delete}")
+        else:
+            print(f"  未找到 profile: {args.profile_delete}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.history_clear:
+        count = history_manager.clear()
+        print(f"  已清空 {count} 条历史记录")
+        return
+
+    if args.history_list:
+        entries = history_manager.query(limit=args.history_limit)
+        if not entries:
+            print("  没有历史记录")
+            return
+        print(f"  最近 {len(entries)} 条历史:\n")
+        for i, e in enumerate(entries, 1):
+            status = f"{e.status_code}" if not e.error else "ERR"
+            profile_str = f"  [{e.profile_name}]" if e.profile_name else ""
+            print(
+                f"  [{i:>3}] {e.timestamp}  {e.method:<6} "
+                f"{e.total_time_ms:>8.2f}ms  {status:<5} "
+                f"{profile_str} {e.url[:60]}"
+            )
+        return
+
+    if args.history_trend:
+        trend = history_manager.get_trend(
+            url=args.url,
+            profile_name=args.profile_use,
+            limit=args.history_limit,
+        )
+        if args.json:
+            data = {
+                "url": trend.url,
+                "count": trend.count,
+                "success_count": trend.success_count,
+                "failure_count": trend.failure_count,
+                "failure_rate_pct": round(trend.failure_rate, 2),
+                "avg_total_ms": round(trend.avg_total_ms, 3),
+                "avg_ttfb_ms": round(trend.avg_ttfb_ms, 3),
+                "min_total_ms": round(trend.min_total_ms, 3),
+                "max_total_ms": round(trend.max_total_ms, 3),
+                "status_codes": trend.status_codes,
+                "timeline": trend.timeline,
+            }
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            if trend.count == 0:
+                print("  没有找到匹配的历史记录")
+            else:
+                print(f"\n  ========================================")
+                print(f"  趋势分析: {trend.url}")
+                print(f"  ========================================")
+                print(trend.format_table())
+                print()
+        return
+
+    applied_profile = None
+    if args.profile_use:
+        applied_profile = profile_manager.apply(args.profile_use)
+        if not args.url and applied_profile:
+            args.url = applied_profile.url if hasattr(applied_profile, 'url') and applied_profile.url else args.url
+        if applied_profile:
+            if not args.method or args.method == "GET":
+                args.method = applied_profile.method
+            if not args.body and applied_profile.body:
+                args.body = applied_profile.body
+            if args.timeout == 30:
+                args.timeout = applied_profile.timeout
+
+    if not args.url and not args.compare and not args.profile_save:
         parser.print_help()
         sys.exit(1)
 
     headers = {}
+    if applied_profile and applied_profile.headers:
+        headers.update(applied_profile.headers)
     if args.headers_file:
         try:
-            headers = load_headers_from_file(args.headers_file)
+            headers.update(load_headers_from_file(args.headers_file))
         except Exception as e:
             print(f"错误: 无法读取请求头文件: {e}", file=sys.stderr)
             sys.exit(1)
-
     if args.headers_list:
         for h in args.headers_list:
             if ":" in h:
@@ -244,13 +413,50 @@ def main():
                 headers[key.strip()] = value.strip()
 
     if not headers:
-        headers["User-Agent"] = "httpdiag/1.1"
+        headers["User-Agent"] = "httpdiag/1.2"
         headers["Accept"] = "*/*"
 
     if args.method:
         args.method = args.method.upper()
 
+    if args.profile_save:
+        if not args.url:
+            print("错误: 保存 profile 需要 URL", file=sys.stderr)
+            sys.exit(1)
+        try:
+            profile = profile_manager.save(
+                name=args.profile_save,
+                method=args.method,
+                url=args.url,
+                headers=headers,
+                body=args.body or "",
+                timeout=args.timeout,
+                overwrite=args.overwrite,
+            )
+            print(f"  已保存 profile: {profile.name}")
+            print(f"    方法: {profile.method}")
+            print(f"    URL:  {args.url}")
+            print(f"    Headers: {len(profile.headers)} 个")
+            if profile.body:
+                print(f"    Body: {len(profile.body)} 字节")
+        except ValueError as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     logger = RequestLogger(log_dir=args.log_dir)
+
+    def _save_history(result, mode="single"):
+        if args.no_history:
+            return
+        try:
+            history_manager.add_from_result(
+                result,
+                profile_name=args.profile_use,
+                mode=mode,
+            )
+        except Exception:
+            pass
 
     if args.batch:
         if not args.url:
@@ -283,6 +489,13 @@ def main():
             follow_redirects=not args.no_redirect,
             on_progress=progress_cb,
         )
+
+        if not args.no_history:
+            try:
+                for r in batch_result.results:
+                    history_manager.add_from_result(r, profile_name=args.profile_use, mode="batch")
+            except Exception:
+                pass
 
         if args.json:
             print(batch_result.to_json())
@@ -323,6 +536,9 @@ def main():
             body=args.body,
         )
 
+        _save_history(compare_result.items[0].result, mode="compare")
+        _save_history(compare_result.items[1].result, mode="compare")
+
         if args.json:
             print(compare_result.to_json())
         else:
@@ -358,6 +574,8 @@ def main():
             body=args.body,
         )
 
+        _save_history(result, mode="single")
+
         if args.json:
             print(result.to_json())
         else:
@@ -388,6 +606,9 @@ def main():
             headers=headers,
             body=args.body,
         )
+
+        if chain.final_result:
+            _save_history(chain.final_result, mode="redirect")
 
         if args.json:
             print(chain.to_json())
