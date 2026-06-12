@@ -1,10 +1,10 @@
 import socket
 import ssl
 import time
-import http.client
+import json
 import urllib.parse
-from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Tuple
+from dataclasses import dataclass, field, asdict
+from typing import Dict, Optional, List, Any
 
 
 @dataclass
@@ -21,26 +21,85 @@ class TimingInfo:
     def server_processing(self) -> float:
         return self.time_to_first_byte - self.request_send - self.tcp_connect - self.tls_handshake - self.dns_lookup
 
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "dns_lookup_ms": round(self.dns_lookup * 1000, 3),
+            "tcp_connect_ms": round(self.tcp_connect * 1000, 3),
+            "tls_handshake_ms": round(self.tls_handshake * 1000, 3),
+            "request_send_ms": round(self.request_send * 1000, 3),
+            "time_to_first_byte_ms": round(self.time_to_first_byte * 1000, 3),
+            "content_download_ms": round(self.content_download * 1000, 3),
+            "total_ms": round(self.total * 1000, 3),
+        }
+
 
 @dataclass
 class DiagnosticsResult:
     url: str
     method: str
-    status_code: int
-    status_text: str
-    headers: Dict[str, str] = field(default_factory=dict)
-    body: str = ""
-    body_preview: str = ""
+    status_code: int = 0
+    status_text: str = ""
+    request_headers: Dict[str, str] = field(default_factory=dict)
+    request_body: str = ""
+    response_headers: Dict[str, str] = field(default_factory=dict)
+    response_body: str = ""
+    response_body_preview: str = ""
+    response_body_size: int = 0
     timing: TimingInfo = field(default_factory=TimingInfo)
     ip_address: str = ""
     is_https: bool = False
     error: Optional[str] = None
 
+    @property
+    def headers(self) -> Dict[str, str]:
+        return self.response_headers
+
+    @headers.setter
+    def headers(self, value: Dict[str, str]):
+        self.response_headers = value
+
+    @property
+    def body(self) -> str:
+        return self.response_body
+
+    @body.setter
+    def body(self, value: str):
+        self.response_body = value
+
+    @property
+    def body_preview(self) -> str:
+        return self.response_body_preview
+
+    @body_preview.setter
+    def body_preview(self, value: str):
+        self.response_body_preview = value
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "url": self.url,
+            "method": self.method,
+            "status_code": self.status_code,
+            "status_text": self.status_text,
+            "ip_address": self.ip_address,
+            "is_https": self.is_https,
+            "request_headers": self.request_headers,
+            "request_body": self.request_body,
+            "response_headers": self.response_headers,
+            "response_body_preview": self.response_body_preview,
+            "response_body_size": self.response_body_size,
+            "timing": self.timing.to_dict(),
+        }
+        if self.error:
+            data["error"] = self.error
+        return data
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
 
 class HttpDiagnostics:
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
-        self._dns_cache: Dict[str, str] = {}
 
     def request(
         self,
@@ -52,7 +111,7 @@ class HttpDiagnostics:
         method = method.upper()
         parsed = urllib.parse.urlparse(url)
         is_https = parsed.scheme == "https"
-        host = parsed.hostname
+        host = parsed.hostname or ""
         port = parsed.port or (443 if is_https else 80)
         path = parsed.path or "/"
         if parsed.query:
@@ -61,10 +120,25 @@ class HttpDiagnostics:
         result = DiagnosticsResult(
             url=url,
             method=method,
-            status_code=0,
-            status_text="",
             is_https=is_https,
+            request_body=body or "",
         )
+
+        actual_request_headers: Dict[str, str] = {}
+        actual_request_headers["Host"] = host
+        if headers:
+            for k, v in headers.items():
+                actual_request_headers[k] = v
+
+        has_content_length = any(k.lower() == "content-length" for k in actual_request_headers.keys())
+        if body and not has_content_length:
+            actual_request_headers["Content-Length"] = str(len(body.encode("utf-8")))
+
+        has_connection = any(k.lower() == "connection" for k in actual_request_headers.keys())
+        if not has_connection:
+            actual_request_headers["Connection"] = "close"
+
+        result.request_headers = actual_request_headers
 
         total_start = time.time()
         sock = None
@@ -91,23 +165,8 @@ class HttpDiagnostics:
 
             req_send_start = time.time()
             request_lines = [f"{method} {path} HTTP/1.1"]
-            request_lines.append(f"Host: {host}")
-
-            if headers:
-                for key, value in headers.items():
-                    request_lines.append(f"{key}: {value}")
-
-            has_content_length = False
-            if headers:
-                has_content_length = any(k.lower() == "content-length" for k in headers.keys())
-
-            if body and not has_content_length:
-                request_lines.append(f"Content-Length: {len(body.encode('utf-8'))}")
-
-            has_connection = any(k.lower() == "connection" for k in headers or {})
-            if not has_connection:
-                request_lines.append("Connection: close")
-
+            for k, v in actual_request_headers.items():
+                request_lines.append(f"{k}: {v}")
             request_lines.append("")
             if body:
                 request_lines.append(body)
@@ -146,8 +205,8 @@ class HttpDiagnostics:
 
                     if header_end != -1:
                         body_data = response_data[header_end + 4:]
-                        transfer_encoding = resp_headers.get("Transfer-Encoding", "").lower()
-                        content_length = resp_headers.get("Content-Length")
+                        transfer_encoding = self._get_header_ci(resp_headers, "Transfer-Encoding", "").lower()
+                        content_length = self._get_header_ci(resp_headers, "Content-Length")
 
                         if content_length:
                             try:
@@ -159,8 +218,6 @@ class HttpDiagnostics:
                         elif "chunked" in transfer_encoding:
                             if self._is_chunked_complete(body_data):
                                 is_complete = True
-                        else:
-                            pass
                 except socket.timeout:
                     raise
 
@@ -188,10 +245,10 @@ class HttpDiagnostics:
                 if ":" in line:
                     key, value = line.split(":", 1)
                     resp_headers[key.strip()] = value.strip()
-            result.headers = resp_headers
+            result.response_headers = resp_headers
 
-            transfer_encoding = resp_headers.get("Transfer-Encoding", "").lower()
-            content_length = resp_headers.get("Content-Length")
+            transfer_encoding = self._get_header_ci(resp_headers, "Transfer-Encoding", "").lower()
+            content_length = self._get_header_ci(resp_headers, "Content-Length")
 
             if "chunked" in transfer_encoding:
                 body_data = self._decode_chunked(body_data)
@@ -205,18 +262,19 @@ class HttpDiagnostics:
             result.timing.total = download_end - total_start
             result.timing.content_download = result.timing.total - result.timing.time_to_first_byte
 
-            content_type = resp_headers.get("Content-Type", "")
+            content_type = self._get_header_ci(resp_headers, "Content-Type", "")
             encoding = "utf-8"
             if "charset=" in content_type:
                 charset_part = content_type.split("charset=")[1]
                 encoding = charset_part.split(";")[0].strip()
 
             try:
-                result.body = body_data.decode(encoding, errors="replace")
+                result.response_body = body_data.decode(encoding, errors="replace")
             except (LookupError, UnicodeDecodeError):
-                result.body = body_data.decode("utf-8", errors="replace")
+                result.response_body = body_data.decode("utf-8", errors="replace")
 
-            result.body_preview = result.body[:200]
+            result.response_body_size = len(result.response_body.encode("utf-8"))
+            result.response_body_preview = result.response_body[:200]
 
         except Exception as e:
             result.error = str(e)
@@ -229,6 +287,13 @@ class HttpDiagnostics:
                     pass
 
         return result
+
+    def _get_header_ci(self, headers: Dict[str, str], name: str, default: Optional[str] = None) -> Optional[str]:
+        name_lower = name.lower()
+        for k, v in headers.items():
+            if k.lower() == name_lower:
+                return v
+        return default
 
     def _is_chunked_complete(self, data: bytes) -> bool:
         pos = 0

@@ -1,5 +1,6 @@
+import json
 import urllib.parse
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 
 from .diagnostics import HttpDiagnostics, DiagnosticsResult
@@ -13,11 +14,21 @@ class RedirectStep:
     status_code: int
     result: DiagnosticsResult
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step": self.step,
+            "from_url": self.from_url,
+            "to_url": self.to_url,
+            "status_code": self.status_code,
+            "result": self.result.to_dict(),
+        }
+
 
 @dataclass
 class RedirectChain:
     steps: List[RedirectStep] = field(default_factory=list)
     final_result: Optional[DiagnosticsResult] = None
+    max_redirects_exceeded: bool = False
 
     @property
     def total_redirects(self) -> int:
@@ -32,12 +43,33 @@ class RedirectChain:
             total += self.final_result.timing.total
         return total
 
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "total_redirects": self.total_redirects,
+            "total_time_ms": round(self.total_time * 1000, 3),
+            "max_redirects_exceeded": self.max_redirects_exceeded,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+        if self.final_result:
+            data["final_result"] = self.final_result.to_dict()
+        return data
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
 
 class RedirectTracker:
     def __init__(self, max_redirects: int = 10, timeout: int = 30):
         self.max_redirects = max_redirects
         self.timeout = timeout
         self.diagnostics = HttpDiagnostics(timeout=timeout)
+
+    def _get_header_ci(self, headers: Dict[str, str], name: str) -> Optional[str]:
+        name_lower = name.lower()
+        for k, v in headers.items():
+            if k.lower() == name_lower:
+                return v
+        return None
 
     def follow(
         self,
@@ -66,7 +98,7 @@ class RedirectTracker:
                 break
 
             if 300 <= result.status_code < 400:
-                location = result.headers.get("Location", "")
+                location = self._get_header_ci(result.response_headers, "Location") or ""
                 if not location:
                     chain.final_result = result
                     break
@@ -90,6 +122,7 @@ class RedirectTracker:
                 step_count += 1
 
                 if step_count > self.max_redirects:
+                    chain.max_redirects_exceeded = True
                     result.error = f"Too many redirects (max {self.max_redirects})"
                     chain.final_result = result
                     break

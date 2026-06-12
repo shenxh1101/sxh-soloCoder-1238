@@ -17,6 +17,28 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Location", "/final")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif self.path == "/redirect_lowercase":
+            self.send_response(302)
+            self.wfile.write(b"HTTP/1.1 302 Found\r\n")
+            self.wfile.write(b"location: /final\r\n")
+            self.wfile.write(b"Content-Length: 0\r\n")
+            self.wfile.write(b"\r\n")
+        elif self.path == "/redirect_uppercase":
+            self.send_response(302)
+            self.wfile.write(b"HTTP/1.1 302 Found\r\n")
+            self.wfile.write(b"LOCATION: /final\r\n")
+            self.wfile.write(b"Content-Length: 0\r\n")
+            self.wfile.write(b"\r\n")
+        elif self.path == "/redirect_loop":
+            self.send_response(302)
+            self.send_header("Location", "/redirect_loop2")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.path == "/redirect_loop2":
+            self.send_response(302)
+            self.send_header("Location", "/redirect_loop")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif self.path == "/final":
             body = b"Final destination"
             self.send_response(200)
@@ -62,6 +84,9 @@ if __name__ == "__main__":
     print("  GET / -> 200 Hello World")
     print("  GET /redirect1 -> 302 /redirect2")
     print("  GET /redirect2 -> 301 /final")
+    print("  GET /redirect_lowercase -> 302 (location header lowercase)")
+    print("  GET /redirect_uppercase -> 302 (LOCATION header uppercase)")
+    print("  GET /redirect_loop -> redirect loop for testing max redirects")
     print("  GET /final -> 200 Final destination")
     print("  POST / -> 200 echo POST data")
     try:

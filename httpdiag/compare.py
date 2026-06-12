@@ -1,5 +1,7 @@
-from typing import List, Optional, Dict
+import json
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
+import statistics
 
 from .diagnostics import HttpDiagnostics, DiagnosticsResult
 from .utils import format_duration
@@ -10,6 +12,13 @@ class CompareItem:
     name: str
     url: str
     result: DiagnosticsResult
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "url": self.url,
+            "result": self.result.to_dict(),
+        }
 
 
 @dataclass
@@ -32,6 +41,35 @@ class CompareResult:
             "total": b.timing.total - a.timing.total,
         }
 
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "items": [item.to_dict() for item in self.items],
+        }
+        if len(self.items) >= 2:
+            diff = self.get_diff()
+            data["diff"] = {
+                "dns_lookup_ms": round(diff["dns_lookup"] * 1000, 3),
+                "tcp_connect_ms": round(diff["tcp_connect"] * 1000, 3),
+                "tls_handshake_ms": round(diff["tls_handshake"] * 1000, 3),
+                "time_to_first_byte_ms": round(diff["time_to_first_byte"] * 1000, 3),
+                "content_download_ms": round(diff["content_download"] * 1000, 3),
+                "total_ms": round(diff["total"] * 1000, 3),
+            }
+            a_total = self.items[0].result.timing.total
+            if a_total > 0:
+                data["diff_pct"] = {
+                    "dns_lookup_pct": round(diff["dns_lookup"] / self.items[0].result.timing.dns_lookup * 100, 2) if self.items[0].result.timing.dns_lookup > 0 else 0,
+                    "tcp_connect_pct": round(diff["tcp_connect"] / self.items[0].result.timing.tcp_connect * 100, 2) if self.items[0].result.timing.tcp_connect > 0 else 0,
+                    "tls_handshake_pct": round(diff["tls_handshake"] / self.items[0].result.timing.tls_handshake * 100, 2) if self.items[0].result.timing.tls_handshake > 0 else 0,
+                    "time_to_first_byte_pct": round(diff["time_to_first_byte"] / self.items[0].result.timing.time_to_first_byte * 100, 2) if self.items[0].result.timing.time_to_first_byte > 0 else 0,
+                    "content_download_pct": round(diff["content_download"] / self.items[0].result.timing.content_download * 100, 2) if self.items[0].result.timing.content_download > 0 else 0,
+                    "total_pct": round(diff["total"] / a_total * 100, 2),
+                }
+        return data
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
     def format_table(self) -> str:
         if not self.items:
             return "No items to compare."
@@ -45,7 +83,6 @@ class CompareResult:
             ("Total Time", "total"),
         ]
 
-        col_width = 25
         name_width = max(len(item.name) for item in self.items)
         name_width = max(name_width, 10)
 
@@ -83,7 +120,7 @@ class CompareResult:
 
         body_row = f"{'Body Size':<20}"
         for item in self.items:
-            size = len(item.result.body)
+            size = item.result.response_body_size
             body_row += f" | {f'{size} bytes':>{name_width}}"
         extra_rows.append(body_row)
 
