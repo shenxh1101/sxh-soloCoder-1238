@@ -1,0 +1,75 @@
+{
+  "name": "登录获取用户信息并创建资源",
+  "description": "演示登录 -> 获取用户信息 -> 创建资源 -> 查询资源的完整链路",
+  "steps": [
+    {
+      "name": "登录获取Token",
+      "method": "POST",
+      "url": "http://127.0.0.1:8765/api/login",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"username\": \"testuser\", \"password\": \"testpass\"}",
+      "timeout": 10,
+      "extract": {
+        "auth_token": {
+          "jsonpath": "$.token"
+        },
+        "user_id": {
+          "jsonpath": "$.user.id"
+        }
+      }
+    },
+    {
+      "name": "获取用户信息",
+      "method": "GET",
+      "url": "http://127.0.0.1:8765/api/user",
+      "headers": {
+        "Authorization": "Bearer {{auth_token}}"
+      },
+      "timeout": 10
+    },
+    {
+      "name": "创建资源",
+      "method": "POST",
+      "url": "http://127.0.0.1:8765/api/resource",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {{auth_token}}"
+      },
+      "body": "{\"name\": \"Test Resource for user {{user_id}}}",
+      "timeout": 10,
+      "extract": {
+        "resource_id": {
+          "jsonpath": "$.id"
+        }
+      }
+    },
+    {
+      "name": "查询创建的资源",
+      "method": "GET",
+      "url": "http://127.0.0.1:8765/api/resource/{{resource_id}}",
+      "headers": {
+        "Authorization": "Bearer {{auth_token}}"
+      },
+      "timeout": 10
+    },
+    {
+      "name": "获取资源列表",
+      "method": "GET",
+      "url": "http://127.0.0.1:8765/api/resources",
+      "headers": {
+        "Authorization": "Bearer {{auth_token}}"
+      },
+      "timeout": 10,
+      "skip_on_failure": true
+    },
+    {
+      "name": "检查服务状态",
+      "method": "GET",
+      "url": "http://127.0.0.1:8765/api/status",
+      "timeout": 5,
+      "skip_on_failure": true
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "version": "1.0",
+  "profiles": {
+    "test_local": {
+      "name": "test_local",
+      "method": "POST",
+      "url": "http://127.0.0.1:8765/",
+      "headers": {
+        "User-Agent": "TestAgent/1.0",
+        "Accept": "application/json",
+        "X-Custom-Header": "custom-value",
+        "Content-Type": "application/json"
+      },
+      "body": "{hello:world}",
+      "timeout": 30,
+      "created_at": "2026-06-12 21:20:20",
+      "updated_at": "2026-06-12 21:20:20",
+      "env": "default"
+    },
+    "get_user": {
+      "name": "get_user",
+      "method": "GET",
+      "url": "/api/user",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "",
+      "timeout": 30,
+      "created_at": "2026-06-12 22:15:07",
+      "updated_at": "2026-06-12 22:46:58",
+      "env": "dev"
+    }
+  },
+  "envs": {
+    "default": {
+      "name": "default",
+      "base_url": "",
+      "headers": {},
+      "body": "",
+      "timeout": 30,
+      "variables": {}
+    },
+    "dev": {
+      "name": "dev",
+      "base_url": "http://127.0.0.1:8765",
+      "headers": {
+        "X-Env": "dev",
+        "Authorization": "Bear****7890"
+      },
+      "body": "",
+      "timeout": 30,
+      "variables": {}
+    },
+    "staging": {
+      "name": "staging",
+      "base_url": "http://staging.example.com",
+      "headers": {
+        "X-Env": "staging",
+        "Authorization": "Bear****4321"
+      },
+      "body": "",
+      "timeout": 60,
+      "variables": {}
+    }
+  },
+  "current_env": "dev"
+}

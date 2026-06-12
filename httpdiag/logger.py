@@ -6,6 +6,7 @@ from .diagnostics import DiagnosticsResult
 from .redirect import RedirectChain
 from .compare import CompareResult
 from .batch import BatchResult
+from .collection import CollectionResult
 
 
 class RequestLogger:
@@ -206,6 +207,57 @@ class RequestLogger:
                 f.write(f"REQUEST #{i} / {batch.count}\n")
                 f.write("-" * 70 + "\n")
                 self._write_exchange(f, r)
+
+            f.write("=" * 70 + "\n")
+            f.write("END OF LOG\n")
+            f.write("=" * 70 + "\n")
+
+        return filepath
+
+    def save_collection(self, collection: CollectionResult, filename: Optional[str] = None) -> str:
+        if filename is None:
+            filename = self._gen_filename("collection")
+
+        filepath = os.path.join(self.log_dir, filename)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("=" * 70 + "\n")
+            f.write("HTTP DIAGNOSTICS COLLECTION RUN LOG\n")
+            f.write("=" * 70 + "\n\n")
+
+            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Collection: {collection.name}\n")
+            f.write(f"Total Time: {collection.total_duration_ms:.3f} ms\n")
+            f.write(f"Steps: {len(collection.steps)}\n")
+            f.write(f"Success: {collection.success_count}\n")
+            f.write(f"Failure: {collection.failure_count}\n")
+            f.write(f"Skipped: {collection.skipped_count}\n")
+            f.write(f"Success Rate: {collection.success_rate:.1f}%\n\n")
+
+            if collection.variables:
+                f.write("Extracted Variables:\n")
+                for k, v in collection.variables.items():
+                    f.write(f"  {k} = {v}\n")
+                f.write("\n")
+
+            for i, sr in enumerate(collection.steps, 1):
+                f.write("=" * 70 + "\n")
+                status = "OK" if sr.success else ("SKIP" if sr.skipped else "FAIL")
+                f.write(f"STEP {i}/{len(collection.steps)}: {sr.step.name} [{status}]\n")
+                f.write("=" * 70 + "\n")
+                f.write(f"  URL: {sr.step.url}\n")
+                f.write(f"  Method: {sr.step.method}\n")
+                f.write(f"  Duration: {sr.duration_ms:.3f} ms\n")
+                if sr.error:
+                    f.write(f"  Error: {sr.error}\n")
+                if sr.extracted_variables:
+                    f.write(f"  Extracted:\n")
+                    for k, v in sr.extracted_variables.items():
+                        f.write(f"    {k} = {v}\n")
+                f.write("\n")
+
+                if sr.result:
+                    self._write_exchange(f, sr.result, indent="  ")
 
             f.write("=" * 70 + "\n")
             f.write("END OF LOG\n")

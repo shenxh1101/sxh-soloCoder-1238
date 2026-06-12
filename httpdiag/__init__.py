@@ -4,10 +4,11 @@ from .compare import CompareMode, CompareResult, CompareItem
 from .logger import RequestLogger
 from .batch import BatchTester, BatchResult
 from .har import HarExporter
-from .profiles import ProfileManager, Profile
-from .history import HistoryManager, HistoryEntry, TrendStats
+from .profiles import ProfileManager, Profile, EnvConfig
+from .history import HistoryManager, HistoryEntry, TrendStats, Baseline, AnomalyAlert
+from .collection import CollectionRunner, CollectionResult, CollectionStep, VariableExtractor
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = [
     "HttpDiagnostics",
     "DiagnosticsResult",
@@ -24,7 +25,14 @@ __all__ = [
     "HarExporter",
     "ProfileManager",
     "Profile",
+    "EnvConfig",
     "HistoryManager",
     "HistoryEntry",
     "TrendStats",
+    "Baseline",
+    "AnomalyAlert",
+    "CollectionRunner",
+    "CollectionResult",
+    "CollectionStep",
+    "VariableExtractor",
 ]
